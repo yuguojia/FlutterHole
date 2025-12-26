@@ -379,7 +379,13 @@ class _LatestPostsPageState extends State<LatestPostsPage> {
             if (index >= _posts.length) {
               return const Padding(
                 padding: EdgeInsets.symmetric(vertical: 20),
-                child: Center(child: Text('加载中...')),
+                child: Center(
+                  child: SizedBox(
+                    width: 24,
+                    height: 24,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                ),
               );
             }
             final post = _posts[index];
