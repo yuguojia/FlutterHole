@@ -157,6 +157,8 @@ class SettingsResult {
     required this.cacheEnabled,
     required this.cacheTtlMinutes,
     required this.collapseTaggedPosts,
+    required this.autoHideBottomBar,
+    required this.enableTImageRefererSpoof,
   });
 
   final String tokenT;
@@ -164,4 +166,6 @@ class SettingsResult {
   final bool cacheEnabled;
   final int cacheTtlMinutes;
   final bool collapseTaggedPosts;
+  final bool autoHideBottomBar;
+  final bool enableTImageRefererSpoof;
 }

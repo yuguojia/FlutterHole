@@ -14,12 +14,14 @@ class PostHeader extends StatelessWidget {
     required this.token,
     required this.baseUrl,
     required this.onOpenPost,
+    this.imageHeaders,
   });
 
   final Post post;
   final String token;
   final String baseUrl;
   final ValueChanged<Post> onOpenPost;
+  final Map<String, String>? imageHeaders;
 
   @override
   Widget build(BuildContext context) {
@@ -45,6 +47,7 @@ class PostHeader extends StatelessWidget {
                 baseUrl: baseUrl,
                 currentPostId: post.pid,
                 onOpenPost: onOpenPost,
+                imageHeaders: imageHeaders,
               ),
               const SizedBox(height: 12),
               Wrap(
@@ -78,6 +81,7 @@ class MarkdownContent extends StatelessWidget {
     this.baseUrl,
     this.currentPostId,
     this.onOpenPost,
+    this.imageHeaders,
     this.selectable = true,
   });
 
@@ -87,7 +91,9 @@ class MarkdownContent extends StatelessWidget {
   final String? baseUrl;
   final int? currentPostId;
   final ValueChanged<Post>? onOpenPost;
+  final Map<String, String>? imageHeaders;
   final bool selectable;
+  static const _tholeImageHost = 'file.tholeapis.top';
 
   @override
   Widget build(BuildContext context) {
@@ -112,6 +118,7 @@ class MarkdownContent extends StatelessWidget {
                 onTap: () => _openImage(context, uri),
                 child: Image.network(
                   uri.toString(),
+                  headers: _resolveImageHeaders(uri),
                   fit: BoxFit.contain,
                   width: double.infinity,
                   errorBuilder: (context, error, stackTrace) {
@@ -147,9 +154,18 @@ class MarkdownContent extends StatelessWidget {
   void _openImage(BuildContext context, Uri uri) {
     Navigator.of(context).push(
       MaterialPageRoute(
-        builder: (context) => ImageViewerPage(imageUrl: uri.toString()),
+        builder: (context) => ImageViewerPage(
+          imageUrl: uri.toString(),
+          imageHeaders: _resolveImageHeaders(uri),
+        ),
       ),
     );
+  }
+
+  Map<String, String>? _resolveImageHeaders(Uri uri) {
+    if (imageHeaders == null) return null;
+    if (uri.host != _tholeImageHost) return null;
+    return imageHeaders;
   }
 
   Future<void> _openLink(BuildContext context, String? href) async {
@@ -301,9 +317,14 @@ class AttentionButton extends StatelessWidget {
 }
 
 class ImageViewerPage extends StatelessWidget {
-  const ImageViewerPage({super.key, required this.imageUrl});
+  const ImageViewerPage({
+    super.key,
+    required this.imageUrl,
+    this.imageHeaders,
+  });
 
   final String imageUrl;
+  final Map<String, String>? imageHeaders;
 
   @override
   Widget build(BuildContext context) {
@@ -311,7 +332,7 @@ class ImageViewerPage extends StatelessWidget {
       appBar: AppBar(title: const Text('图片预览')),
       body: Center(
         child: PhotoView(
-          imageProvider: NetworkImage(imageUrl),
+          imageProvider: NetworkImage(imageUrl, headers: imageHeaders),
           minScale: PhotoViewComputedScale.contained * 0.8,
           maxScale: PhotoViewComputedScale.covered * 3,
           errorBuilder: (context, error, stackTrace) {

@@ -5,6 +5,7 @@ import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'constants.dart';
+import 'api_endpoints.dart';
 import 'models.dart';
 import 'utils.dart';
 
@@ -22,7 +23,7 @@ class TholeApiClient {
   }) async {
     final uri = _buildUri(
       baseUrl,
-      'getlist',
+      ApiEndpoints.latestPosts,
       queryParameters: {
         'p': '$page',
         'order_mode': '$orderMode',
@@ -52,7 +53,7 @@ class TholeApiClient {
     if (cached != null) return cached;
     final uri = _buildUri(
       baseUrl,
-      'getone',
+      ApiEndpoints.postById,
       queryParameters: {
         'pid': '$pid',
         if (kIsWeb) 'token': token,
@@ -71,7 +72,7 @@ class TholeApiClient {
   }) async {
     final uri = _buildUri(
       baseUrl,
-      'getattention',
+      ApiEndpoints.attentionPosts,
       queryParameters: {
         if (kIsWeb) 'token': token,
       },
@@ -129,7 +130,7 @@ class TholeApiClient {
         final query = missing.map((pid) => 'pids=$pid').join('&');
         final tokenQuery = kIsWeb ? 'token=$token&' : '';
         final uri = Uri.parse(
-          '$baseUrl/getmulti?$tokenQuery$query',
+          '$baseUrl/${ApiEndpoints.multiPosts}?$tokenQuery$query',
         );
         final data = await _get(uri, token: token);
         final raw = data['data'];
@@ -176,7 +177,7 @@ class TholeApiClient {
   }) async {
     final uri = _buildUri(
       baseUrl,
-      'search',
+      ApiEndpoints.searchPosts,
       queryParameters: {
         'search_mode': searchMode == SearchMode.tag ? '0' : '1',
         'page': '$page',
@@ -203,7 +204,7 @@ class TholeApiClient {
   }) async {
     final uri = _buildUri(
       baseUrl,
-      'getcomment',
+      ApiEndpoints.comments,
       queryParameters: {
         'pid': '$pid',
         if (kIsWeb) 'token': token,
@@ -224,7 +225,7 @@ class TholeApiClient {
   }) async {
     final uri = _buildUri(
       baseUrl,
-      'attention',
+      ApiEndpoints.toggleAttention,
       queryParameters: {
         if (kIsWeb) 'token': token,
       },
@@ -245,7 +246,7 @@ class TholeApiClient {
   }) async {
     final uri = _buildUri(
       baseUrl,
-      'dopost',
+      ApiEndpoints.createPost,
       queryParameters: {
         if (kIsWeb) 'token': token,
       },
@@ -269,7 +270,7 @@ class TholeApiClient {
     required int pid,
     required String text,
   }) async {
-    final uri = _buildApiV2Uri(baseUrl, 'post/$pid/comment');
+    final uri = _buildApiV2Uri(baseUrl, ApiEndpoints.createCommentV2(pid));
     final uriWithToken = kIsWeb
         ? uri.replace(queryParameters: {'token': token})
         : uri;
