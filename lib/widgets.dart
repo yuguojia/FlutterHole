@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:photo_view/photo_view.dart';
 
+import 'constants.dart';
 import 'models.dart';
 import 'services.dart';
 import 'utils.dart';
@@ -106,6 +108,7 @@ class MarkdownContent extends StatelessWidget {
       styleSheet: style,
       onTapLink: (label, href, title) => _openLink(context, href),
       imageBuilder: (uri, title, alt) {
+        final imageUri = _resolveImageUri(uri);
         return Padding(
           padding: const EdgeInsets.symmetric(vertical: 8),
           child: ClipRRect(
@@ -115,14 +118,14 @@ class MarkdownContent extends StatelessWidget {
                   ? BoxConstraints(maxHeight: maxImageHeight!)
                   : const BoxConstraints(),
               child: InkWell(
-                onTap: () => _openImage(context, uri),
+                onTap: () => _openImage(context, imageUri),
                 child: Image.network(
-                  uri.toString(),
-                  headers: _resolveImageHeaders(uri),
+                  imageUri.toString(),
+                  headers: _resolveImageHeaders(imageUri),
                   fit: BoxFit.contain,
                   width: double.infinity,
                   errorBuilder: (context, error, stackTrace) {
-                    return _MarkdownImageFallback(uri: uri);
+                    return _MarkdownImageFallback(uri: imageUri);
                   },
                 ),
               ),
@@ -152,11 +155,12 @@ class MarkdownContent extends StatelessWidget {
   }
 
   void _openImage(BuildContext context, Uri uri) {
+    final imageUri = _resolveImageUri(uri);
     Navigator.of(context).push(
       MaterialPageRoute(
         builder: (context) => ImageViewerPage(
-          imageUrl: uri.toString(),
-          imageHeaders: _resolveImageHeaders(uri),
+          imageUrl: imageUri.toString(),
+          imageHeaders: _resolveImageHeaders(imageUri),
         ),
       ),
     );
@@ -164,8 +168,19 @@ class MarkdownContent extends StatelessWidget {
 
   Map<String, String>? _resolveImageHeaders(Uri uri) {
     if (imageHeaders == null) return null;
+    if (kIsWeb) return null;
     if (uri.host != _tholeImageHost) return null;
     return imageHeaders;
+  }
+
+  Uri _resolveImageUri(Uri uri) {
+    if (!kIsWeb) return uri;
+    if (uri.host != _tholeImageHost) return uri;
+    final base = Uri.parse(tholeWebProxyBaseUrl);
+    final origin = '${base.scheme}://${base.host}'
+        '${base.hasPort ? ':${base.port}' : ''}';
+    final encoded = Uri.encodeComponent(uri.toString());
+    return Uri.parse('$origin/img?url=$encoded');
   }
 
   Future<void> _openLink(BuildContext context, String? href) async {
