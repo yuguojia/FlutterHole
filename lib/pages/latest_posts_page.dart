@@ -310,31 +310,27 @@ class _LatestPostsPageState extends State<LatestPostsPage> {
   }
 
   PreferredSizeWidget? _buildModeBar(BuildContext context) {
-    final isWide = _isWide(context);
-    final width = MediaQuery.of(context).size.width;
-    final barWidth = isWide ? width * 0.7 : width;
-    const barHeight = 56.0;
+    const barHeight = 72.0;
     return PreferredSize(
       preferredSize: const Size.fromHeight(barHeight),
       child: SizedBox(
         height: barHeight,
         child: Center(
-          child: ConstrainedBox(
-            constraints: BoxConstraints(maxWidth: barWidth),
-            child: ListView.separated(
-              padding: const EdgeInsets.symmetric(horizontal: 12),
-              scrollDirection: Axis.horizontal,
-              itemCount: FeedMode.values.length,
-              itemBuilder: (context, index) {
-                final mode = FeedMode.values[index];
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            child: Wrap(
+              alignment: WrapAlignment.center,
+              spacing: 8,
+              runSpacing: 8,
+              children: FeedMode.values.map((mode) {
                 final selected = mode == _feedMode;
                 return ChoiceChip(
                   label: Text(mode.label),
                   selected: selected,
+                  labelPadding: const EdgeInsets.symmetric(horizontal: 12),
                   onSelected: (value) => _switchMode(mode),
                 );
-              },
-              separatorBuilder: (_, __) => const SizedBox(width: 6),
+              }).toList(),
             ),
           ),
         ),
