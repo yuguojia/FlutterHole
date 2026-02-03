@@ -82,14 +82,15 @@ Future<Response> _forwardRequest(
     }
 
     final inbound = await outbound.close();
-    final bodyBytes = await inbound.fold<List<int>>(<int>[], (buffer, chunk) {
+    final responseBytes =
+        await inbound.fold<List<int>>(<int>[], (buffer, chunk) {
       buffer.addAll(chunk);
       return buffer;
     });
 
     return Response(
       inbound.statusCode,
-      body: bodyBytes,
+      body: responseBytes,
       headers: {
         'content-type': inbound.headers.contentType?.toString() ??
             'application/octet-stream',
@@ -130,7 +131,13 @@ String _resolveApiPrefix(String path) {
   for (final prefix in prefixes) {
     if (path.startsWith(prefix)) {
       final parts = prefix.split('/');
-      return '/${parts[1]}/${parts[2]}';
+      if (parts.length >= 3) {
+        return '/${parts[1]}/${parts[2]}';
+      }
+      if (parts.length == 2) {
+        return '/${parts[0]}/${parts[1]}';
+      }
+      break;
     }
   }
   return '/_api/v1';
