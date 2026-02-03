@@ -47,6 +47,7 @@ class _LatestPostsPageState extends State<LatestPostsPage> {
   bool _isRefreshing = false;
   int _page = 1;
   String? _errorMessage;
+  Post? _selectedPost;
   BackendConfig get _activeBackend =>
       switch (_backend) {
         BackendType.t => BackendConfig.t,
@@ -221,11 +222,13 @@ class _LatestPostsPageState extends State<LatestPostsPage> {
   @override
   Widget build(BuildContext context) {
     final isWide = _isWide(context);
+    final isSplit = _isSplitView(context);
+    final showDetailPane = isSplit && _selectedPost != null;
     final imageHeaders = _buildImageHeaders();
     return Scaffold(
-      appBar: _buildAppBar(context),
+      appBar: _buildAppBar(context, showDetailPane),
       body: _tab == MainTab.feed
-          ? _buildFeedBody(isWide)
+          ? _buildFeedBody(context, isWide, showDetailPane)
           : FavoritesView(
               key: _favoritesKey,
               token: _token,
@@ -264,8 +267,19 @@ class _LatestPostsPageState extends State<LatestPostsPage> {
     );
   }
 
-  PreferredSizeWidget _buildAppBar(BuildContext context) {
+  PreferredSizeWidget _buildAppBar(BuildContext context, bool showDetailPane) {
     return AppBar(
+      leading: showDetailPane
+          ? IconButton(
+              onPressed: () {
+                setState(() {
+                  _selectedPost = null;
+                });
+              },
+              tooltip: '返回',
+              icon: const Icon(Icons.arrow_back),
+            )
+          : null,
       title: _buildBackendSwitcherTitle(),
       bottom: _tab == MainTab.feed ? _buildModeBar(context) : null,
       actions: [
@@ -328,7 +342,8 @@ class _LatestPostsPageState extends State<LatestPostsPage> {
     );
   }
 
-  Widget _buildFeedBody(bool isWide) {
+  Widget _buildFeedBody(
+      BuildContext context, bool isWide, bool showDetailPane) {
     if (_isLoading && _posts.isEmpty) {
       return const Center(child: CircularProgressIndicator());
     }
@@ -365,7 +380,7 @@ class _LatestPostsPageState extends State<LatestPostsPage> {
     final width = MediaQuery.of(context).size.width;
     final contentWidth = isWide ? width * 0.7 : width;
     final imageHeaders = _buildImageHeaders();
-    return RefreshIndicator(
+    final feedList = RefreshIndicator(
       onRefresh: _refresh,
       child: NotificationListener<ScrollNotification>(
         onNotification: _onPostScrollNotification,
@@ -393,6 +408,7 @@ class _LatestPostsPageState extends State<LatestPostsPage> {
             final preview = collapsed
                 ? ''
                 : truncateMarkdown(post.text, _previewMaxChars);
+            final isSelected = _selectedPost?.pid == post.pid;
             return Center(
               child: SizedBox(
                 width: contentWidth,
@@ -400,10 +416,12 @@ class _LatestPostsPageState extends State<LatestPostsPage> {
                   padding: const EdgeInsets.only(bottom: 12),
                   child: Card(
                     elevation: 0,
-                    color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                    color: isSelected
+                        ? Theme.of(context).colorScheme.secondaryContainer
+                        : Theme.of(context).colorScheme.surfaceContainerHighest,
                     child: InkWell(
                       borderRadius: BorderRadius.circular(12),
-                      onTap: () => _openDetail(post),
+                      onTap: () => _openDetail(context, post),
                       child: Padding(
                         padding: const EdgeInsets.all(16),
                         child: Stack(
@@ -426,7 +444,8 @@ class _LatestPostsPageState extends State<LatestPostsPage> {
                                     token: _token,
                                     baseUrl: _activeBaseUrl,
                                     currentPostId: post.pid,
-                                    onOpenPost: _openDetail,
+                                    onOpenPost: (value) =>
+                                        _openDetail(context, value),
                                     imageHeaders: imageHeaders,
                                     selectable: false,
                                   ),
@@ -472,6 +491,21 @@ class _LatestPostsPageState extends State<LatestPostsPage> {
           },
         ),
       ),
+    );
+
+    if (!showDetailPane) {
+      return feedList;
+    }
+
+    return Row(
+      children: [
+        Expanded(flex: 6, child: feedList),
+        const VerticalDivider(width: 1),
+        Expanded(
+          flex: 5,
+          child: _buildDetailPane(imageHeaders),
+        ),
+      ],
     );
   }
 
@@ -577,6 +611,10 @@ class _LatestPostsPageState extends State<LatestPostsPage> {
     return MediaQuery.of(context).size.width > 720;
   }
 
+  bool _isSplitView(BuildContext context) {
+    return MediaQuery.of(context).size.width >= 1100;
+  }
+
   Future<void> _openSettings() async {
     await Navigator.of(context).push(
       MaterialPageRoute(
@@ -674,7 +712,13 @@ class _LatestPostsPageState extends State<LatestPostsPage> {
     await _fetchPosts(showLoadingIndicator: true);
   }
 
-  Future<void> _openDetail(Post post) async {
+  Future<void> _openDetail(BuildContext context, Post post) async {
+    if (_isSplitView(context)) {
+      setState(() {
+        _selectedPost = post;
+      });
+      return;
+    }
     final updated = await Navigator.of(context).push<Post>(
       MaterialPageRoute(
         builder: (context) => PostDetailPage(
@@ -693,6 +737,28 @@ class _LatestPostsPageState extends State<LatestPostsPage> {
         _replacePostAttention(_posts, updated.pid, updated.attention ?? false);
       });
     }
+  }
+
+  Widget _buildDetailPane(Map<String, String>? imageHeaders) {
+    final post = _selectedPost;
+    if (post == null) {
+      return Center(
+        child: Text(
+          '选择一条帖子查看详情',
+          style: Theme.of(context).textTheme.bodyMedium,
+        ),
+      );
+    }
+    return PostDetailPage(
+      key: ValueKey(post.pid),
+      post: post,
+      pid: post.pid,
+      token: _token,
+      baseUrl: _activeBaseUrl,
+      backendKey: _backend.name,
+      supportsComment: _activeBackend.supportsComment,
+      imageHeaders: imageHeaders,
+    );
   }
 
   Future<void> _togglePostAttention(Post post) async {
