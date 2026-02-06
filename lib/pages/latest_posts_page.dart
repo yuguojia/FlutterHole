@@ -239,7 +239,7 @@ class _LatestPostsPageState extends State<LatestPostsPage> {
               imageHeaders: imageHeaders,
               onBottomBarVisibilityChanged: _setBottomBarVisible,
             ),
-      floatingActionButton: _tab == MainTab.feed
+      floatingActionButton: _tab == MainTab.feed && !showDetailPane
           ? Column(
               mainAxisSize: MainAxisSize.min,
               children: [
@@ -493,9 +493,41 @@ class _LatestPostsPageState extends State<LatestPostsPage> {
       return feedList;
     }
 
+    final leftPane = Stack(
+      children: [
+        Positioned.fill(child: feedList),
+        Positioned(
+          right: 16,
+          bottom: 16,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (_showScrollToTop)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 12),
+                  child: FloatingActionButton.small(
+                    heroTag: 'scroll_to_top_split',
+                    onPressed: _scrollToTop,
+                    tooltip: '回顶部',
+                    child: const Icon(Icons.arrow_upward),
+                  ),
+                ),
+              if (_activeBackend.supportsPost)
+                FloatingActionButton(
+                  heroTag: 'compose_post_split',
+                  onPressed: _openComposePage,
+                  tooltip: '发帖',
+                  child: const Icon(Icons.edit),
+                ),
+            ],
+          ),
+        ),
+      ],
+    );
+
     return Row(
       children: [
-        Expanded(flex: 6, child: feedList),
+        Expanded(flex: 6, child: leftPane),
         const VerticalDivider(width: 1),
         Expanded(
           flex: 5,
