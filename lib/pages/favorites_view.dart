@@ -1,4 +1,9 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
+import 'package:sqflite/sqflite.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 
 import '../models.dart';
 import '../services.dart';
@@ -43,9 +48,14 @@ class FavoritesViewState extends State<FavoritesView> {
   String? _errorMessage;
   String _cachedInput = '';
 
+  bool get _isLocalBackend => widget.backendKey == 'local';
+
   @override
   void initState() {
     super.initState();
+    if (_isLocalBackend) {
+      _mode = FavoritesMode.local; // 本地旧洞强制使用本地收藏模式
+    }
     _loadLocalFavorites();
     _loadPosts();
   }
@@ -65,6 +75,9 @@ class FavoritesViewState extends State<FavoritesView> {
   void didUpdateWidget(covariant FavoritesView oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.backendKey != widget.backendKey) {
+      if (_isLocalBackend) {
+        _mode = FavoritesMode.local;
+      }
       _loadLocalFavorites();
       _loadPosts();
     }
@@ -76,6 +89,46 @@ class FavoritesViewState extends State<FavoritesView> {
     super.dispose();
   }
 
+  // ================= 新增：从 SQLite 批量查询收藏的帖子 =================
+  Future<List<Post>> _fetchLocalFavoritesFromDb(List<int> ids) async {
+    if (ids.isEmpty) return [];
+
+    Directory appDocDir = await getApplicationDocumentsDirectory();
+    String dbPath = p.join(appDocDir.path, 'old_hole.db');
+    Database db = await openDatabase(dbPath);
+
+    List<Post> localPosts = [];
+
+    // SQLite 的 IN 语句参数上限通常是 999，所以按 900 分块查询防止崩溃
+    for (int i = 0; i < ids.length; i += 900) {
+      final chunk = ids.sublist(i, i + 900 > ids.length ? ids.length : i + 900);
+      final placeholders = List.filled(chunk.length, '?').join(',');
+
+      List<Map<String, dynamic>> maps = await db.query(
+        'posts',
+        where: 'pid IN ($placeholders)',
+        whereArgs: chunk,
+        orderBy: 'pid DESC',
+      );
+
+      localPosts.addAll(maps.map((m) {
+        return Post(
+          pid: m['pid'] as int,
+          text: m['text'] as String,
+          timestamp: m['timestamp'] as int?,
+          commentCount: m['reply_count'] as int? ?? 0,
+          attention: true, // 能查出来的肯定是被关注了的
+          tags: m['tag'] != null && m['tag'].toString().trim().isNotEmpty
+              ? [m['tag'].toString()]
+              : [],
+        );
+      }));
+    }
+
+    await db.close();
+    return localPosts;
+  }
+
   Future<void> _loadPosts({bool bypassCache = false}) async {
     setState(() {
       _isLoading = true;
@@ -83,20 +136,28 @@ class FavoritesViewState extends State<FavoritesView> {
     });
     try {
       List<Post> posts;
-      if (_mode == FavoritesMode.online) {
-        posts = await _apiClient.fetchAttentionPosts(
-          token: widget.token,
-          baseUrl: widget.baseUrl,
-        );
-      } else {
+
+      // 拦截本地旧洞模式
+      if (_isLocalBackend) {
         final ids = await FavoritesStore.load(widget.backendKey);
-        posts = await _apiClient.fetchMultiPosts(
-          token: widget.token,
-          baseUrl: widget.baseUrl,
-          pids: ids,
-          bypassCache: bypassCache,
-        );
+        posts = await _fetchLocalFavoritesFromDb(ids);
+      } else {
+        if (_mode == FavoritesMode.online) {
+          posts = await _apiClient.fetchAttentionPosts(
+            token: widget.token,
+            baseUrl: widget.baseUrl,
+          );
+        } else {
+          final ids = await FavoritesStore.load(widget.backendKey);
+          posts = await _apiClient.fetchMultiPosts(
+            token: widget.token,
+            baseUrl: widget.baseUrl,
+            pids: ids,
+            bypassCache: bypassCache,
+          );
+        }
       }
+
       if (!mounted) return;
       setState(() {
         _posts
@@ -133,12 +194,16 @@ class FavoritesViewState extends State<FavoritesView> {
     });
     final next = !(post.attention ?? false);
     try {
-      await _apiClient.toggleAttention(
-        token: widget.token,
-        baseUrl: widget.baseUrl,
-        pid: post.pid,
-        enable: next,
-      );
+      // 拦截本地旧洞模式下的网络请求
+      if (!_isLocalBackend) {
+        await _apiClient.toggleAttention(
+          token: widget.token,
+          baseUrl: widget.baseUrl,
+          pid: post.pid,
+          enable: next,
+        );
+      }
+
       await FavoritesStore.update(widget.backendKey, post.pid, next);
       if (!mounted) return;
       setState(() {
@@ -213,35 +278,37 @@ class FavoritesViewState extends State<FavoritesView> {
             padding: const EdgeInsets.all(16),
             child: Column(
               children: [
-                Row(
-                  children: [
-                    ChoiceChip(
-                      label: const Text('线上收藏'),
-                      selected: _mode == FavoritesMode.online,
-                      onSelected: (value) {
-                        setState(() {
-                          _mode = FavoritesMode.online;
-                          _showLocalEditor = false;
-                        });
-                        _loadPosts();
-                      },
-                    ),
-                    const SizedBox(width: 8),
-                    ChoiceChip(
-                      label: const Text('本地收藏'),
-                      selected: _mode == FavoritesMode.local,
-                      onSelected: (value) {
-                        setState(() {
-                          _mode = FavoritesMode.local;
-                          _showLocalEditor = false;
-                        });
-                        _loadPosts();
-                      },
-                    ),
-                  ],
-                ),
+                // 只有在线上版才显示切换芯片，本地旧洞隐藏
+                if (!_isLocalBackend)
+                  Row(
+                    children: [
+                      ChoiceChip(
+                        label: const Text('线上收藏'),
+                        selected: _mode == FavoritesMode.online,
+                        onSelected: (value) {
+                          setState(() {
+                            _mode = FavoritesMode.online;
+                            _showLocalEditor = false;
+                          });
+                          _loadPosts();
+                        },
+                      ),
+                      const SizedBox(width: 8),
+                      ChoiceChip(
+                        label: const Text('本地收藏'),
+                        selected: _mode == FavoritesMode.local,
+                        onSelected: (value) {
+                          setState(() {
+                            _mode = FavoritesMode.local;
+                            _showLocalEditor = false;
+                          });
+                          _loadPosts();
+                        },
+                      ),
+                    ],
+                  ),
                 if (_mode == FavoritesMode.local) ...[
-                  const SizedBox(height: 8),
+                  if (!_isLocalBackend) const SizedBox(height: 8),
                   Align(
                     alignment: Alignment.centerRight,
                     child: TextButton.icon(

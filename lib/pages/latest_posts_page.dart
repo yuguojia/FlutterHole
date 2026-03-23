@@ -1,8 +1,12 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:sqflite/sqflite.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 
 import '../constants.dart';
 import '../models.dart';
@@ -27,7 +31,7 @@ class LatestPostsPage extends StatefulWidget {
 class _LatestPostsPageState extends State<LatestPostsPage> {
   final _apiClient = TholeApiClient();
   final GlobalKey<FavoritesViewState> _favoritesKey =
-      GlobalKey<FavoritesViewState>();
+  GlobalKey<FavoritesViewState>();
   final List<Post> _posts = [];
   final ScrollController _feedScrollController = ScrollController();
   final int _previewMaxChars = 160;
@@ -48,12 +52,18 @@ class _LatestPostsPageState extends State<LatestPostsPage> {
   int _page = 1;
   String? _errorMessage;
   Post? _selectedPost;
+
+  // 新增：判断本地是否存在旧洞数据
+  bool _hasLocalDb = false;
+
   BackendConfig get _activeBackend =>
       switch (_backend) {
         BackendType.t => BackendConfig.t,
         BackendType.q => BackendConfig.q,
         BackendType.qOld => BackendConfig.qOld,
+        BackendType.local => BackendConfig.local, // 处理本地类型
       };
+
   String get _activeBaseUrl =>
       kIsWeb ? _activeBackend.webProxyBaseUrl : _activeBackend.baseUrl;
   int get _activeRoomId => _activeBackend.roomId;
@@ -81,31 +91,50 @@ class _LatestPostsPageState extends State<LatestPostsPage> {
 
   Future<void> _loadPreferences() async {
     final prefs = await SharedPreferences.getInstance();
+
+    // --- 新增：检测本地数据库文件是否存在 ---
+    final appDocDir = await getApplicationDocumentsDirectory();
+    final dbPath = p.join(appDocDir.path, 'old_hole.db');
+    final hasDb = await File(dbPath).exists();
+    // ------------------------------------
+
     final raw = prefs.getString('backend') ?? BackendType.t.name;
     final tokenT = prefs.getString('token_t') ?? defaultTokenT;
     final tokenQ = prefs.getString('token_q') ?? defaultTokenQ;
     final modeT = prefs.getInt('mode_t') ?? FeedMode.latestPost.orderMode;
     final modeQ = prefs.getInt('mode_q') ?? FeedMode.latestPost.orderMode;
     final modeQ2 = prefs.getInt('mode_q2') ?? FeedMode.latestPost.orderMode;
-    final selected = BackendType.values.firstWhere(
-      (value) => value.name == raw,
+    final modeLocal = prefs.getInt('mode_local') ?? FeedMode.latestPost.orderMode;
+
+    var selected = BackendType.values.firstWhere(
+          (value) => value.name == raw,
       orElse: () => BackendType.t,
     );
+
+    // 如果用户之前选了本地旧洞，但文件后来被删了，强制切回 T 洞
+    if (selected == BackendType.local && !hasDb) {
+      selected = BackendType.t;
+    }
+
     final selectedMode = switch (selected) {
       BackendType.t => modeT,
       BackendType.q => modeQ,
       BackendType.qOld => modeQ2,
+      BackendType.local => modeLocal, // 处理本地类型
     };
+
     if (!mounted) return;
     setState(() {
+      _hasLocalDb = hasDb;
       _backend = selected;
       _token = switch (selected) {
         BackendType.t => tokenT,
         BackendType.q => tokenQ,
         BackendType.qOld => tokenQ,
+        BackendType.local => '', // 本地不需要 token
       };
       _feedMode = FeedMode.values.firstWhere(
-        (mode) => mode.orderMode == selectedMode,
+            (mode) => mode.orderMode == selectedMode,
         orElse: () => FeedMode.latestPost,
       );
       _collapseTaggedPosts =
@@ -159,6 +188,59 @@ class _LatestPostsPageState extends State<LatestPostsPage> {
     });
   }
 
+  // ================= 新增：执行本地 SQLite 查询的方法 =================
+  Future<List<Post>> _fetchLocalPosts({required int page}) async {
+    Directory appDocDir = await getApplicationDocumentsDirectory();
+    String dbPath = p.join(appDocDir.path, 'old_hole.db');
+    Database db = await openDatabase(dbPath);
+
+    String orderBy;
+    switch (_feedMode) {
+      case FeedMode.latestPost:
+        orderBy = 'pid DESC';
+        break;
+      case FeedMode.latestReply:
+      // 如果没有更新时间则回退到发布时间
+        orderBy = 'COALESCE(updated_at, timestamp) DESC';
+        break;
+      case FeedMode.hot:
+        orderBy = 'reply_count DESC';
+        break;
+      case FeedMode.classic:
+        orderBy = 'likenum DESC';
+        break;
+      case FeedMode.random:
+        orderBy = 'RANDOM()';
+        break;
+    }
+
+    int limit = 20; // 每次加载 20 条
+    int offset = (page - 1) * limit;
+
+    List<Map<String, dynamic>> maps = await db.query(
+      'posts',
+      orderBy: orderBy,
+      limit: limit,
+      offset: offset,
+    );
+
+    await db.close();
+
+    return maps.map((m) {
+      return Post(
+        pid: m['pid'] as int,
+        text: m['text'] as String,
+        timestamp: m['timestamp'] as int?,
+        commentCount: m['reply_count'] as int? ?? 0,
+        attention: false,
+        tags: m['tag'] != null && m['tag'].toString().trim().isNotEmpty
+            ? [m['tag'].toString()]
+            : [],
+      );
+    }).toList();
+  }
+  // =============================================================
+
   Future<void> _fetchPosts({
     int page = 1,
     bool append = false,
@@ -177,13 +259,21 @@ class _LatestPostsPageState extends State<LatestPostsPage> {
     });
 
     try {
-      final posts = await _apiClient.fetchLatestPosts(
-        token: _token,
-        baseUrl: _activeBaseUrl,
-        roomId: _activeRoomId,
-        orderMode: _activeOrderMode,
-        page: page,
-      );
+      List<Post> posts = [];
+
+      // 判断当前是否是“本地旧洞”模式，如果是则拦截 API 调用，转向本地 SQL 查询
+      if (_backend == BackendType.local) {
+        posts = await _fetchLocalPosts(page: page);
+      } else {
+        posts = await _apiClient.fetchLatestPosts(
+          token: _token,
+          baseUrl: _activeBaseUrl,
+          roomId: _activeRoomId,
+          orderMode: _activeOrderMode,
+          page: page,
+        );
+      }
+
       if (!mounted) return;
       setState(() {
         if (append) {
@@ -230,38 +320,38 @@ class _LatestPostsPageState extends State<LatestPostsPage> {
       body: _tab == MainTab.feed
           ? _buildFeedBody(context, isWide, showDetailPane)
           : FavoritesView(
-              key: _favoritesKey,
-              token: _token,
-              baseUrl: _activeBaseUrl,
-              backendKey: _backend.name,
-              supportsComment: _activeBackend.supportsComment,
-              showInlineActions: true,
-              imageHeaders: imageHeaders,
-              onBottomBarVisibilityChanged: _setBottomBarVisible,
-            ),
+        key: _favoritesKey,
+        token: _token,
+        baseUrl: _activeBaseUrl,
+        backendKey: _backend.name,
+        supportsComment: _activeBackend.supportsComment,
+        showInlineActions: true,
+        imageHeaders: imageHeaders,
+        onBottomBarVisibilityChanged: _setBottomBarVisible,
+      ),
       floatingActionButton: _tab == MainTab.feed && !showDetailPane
           ? Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (_showScrollToTop)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 12),
-                    child: FloatingActionButton.small(
-                      heroTag: 'scroll_to_top',
-                      onPressed: _scrollToTop,
-                      tooltip: '回顶部',
-                      child: const Icon(Icons.arrow_upward),
-                    ),
-                  ),
-                if (_activeBackend.supportsPost)
-                  FloatingActionButton(
-                    heroTag: 'compose_post',
-                    onPressed: _openComposePage,
-                    tooltip: '发帖',
-                    child: const Icon(Icons.edit),
-                  ),
-              ],
-            )
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (_showScrollToTop)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 12),
+              child: FloatingActionButton.small(
+                heroTag: 'scroll_to_top',
+                onPressed: _scrollToTop,
+                tooltip: '回顶部',
+                child: const Icon(Icons.arrow_upward),
+              ),
+            ),
+          if (_activeBackend.supportsPost)
+            FloatingActionButton(
+              heroTag: 'compose_post',
+              onPressed: _openComposePage,
+              tooltip: '发帖',
+              child: const Icon(Icons.edit),
+            ),
+        ],
+      )
           : null,
       bottomNavigationBar: _buildBottomBar(isWide),
     );
@@ -271,14 +361,14 @@ class _LatestPostsPageState extends State<LatestPostsPage> {
     return AppBar(
       leading: showDetailPane
           ? IconButton(
-              onPressed: () {
-                setState(() {
-                  _selectedPost = null;
-                });
-              },
-              tooltip: '返回',
-              icon: const Icon(Icons.arrow_back),
-            )
+        onPressed: () {
+          setState(() {
+            _selectedPost = null;
+          });
+        },
+        tooltip: '返回',
+        icon: const Icon(Icons.arrow_back),
+      )
           : null,
       title: _buildBackendSwitcherTitle(),
       bottom: _tab == MainTab.feed ? _buildModeBar(context) : null,
@@ -294,10 +384,10 @@ class _LatestPostsPageState extends State<LatestPostsPage> {
           tooltip: '刷新',
           icon: _isRefreshing
               ? const SizedBox(
-                  width: 20,
-                  height: 20,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                )
+            width: 20,
+            height: 20,
+            child: CircularProgressIndicator(strokeWidth: 2),
+          )
               : const Icon(Icons.refresh),
         ),
         IconButton(
@@ -431,7 +521,7 @@ class _LatestPostsPageState extends State<LatestPostsPage> {
                                   Text(
                                     '含 tag 的帖子已折叠',
                                     style:
-                                        Theme.of(context).textTheme.bodySmall,
+                                    Theme.of(context).textTheme.bodySmall,
                                   )
                                 else
                                   MarkdownContent(
@@ -472,7 +562,7 @@ class _LatestPostsPageState extends State<LatestPostsPage> {
                               child: AttentionButton(
                                 isActive: post.attention ?? false,
                                 isLoading:
-                                    _togglingAttention.contains(post.pid),
+                                _togglingAttention.contains(post.pid),
                                 onPressed: () => _togglePostAttention(post),
                               ),
                             ),
@@ -583,12 +673,14 @@ class _LatestPostsPageState extends State<LatestPostsPage> {
           _switchBackend(value);
         },
         items: BackendType.values
+        // 如果本地没有数据库文件，就隐藏“本地旧洞”选项
+            .where((backend) => backend != BackendType.local || _hasLocalDb)
             .map(
               (backend) => DropdownMenuItem(
-                value: backend,
-                child: Text(_configFor(backend).name),
-              ),
-            )
+            value: backend,
+            child: Text(_configFor(backend).name),
+          ),
+        )
             .toList(),
       ),
     );
@@ -602,20 +694,25 @@ class _LatestPostsPageState extends State<LatestPostsPage> {
     final modeT = prefs.getInt('mode_t') ?? FeedMode.latestPost.orderMode;
     final modeQ = prefs.getInt('mode_q') ?? FeedMode.latestPost.orderMode;
     final modeQ2 = prefs.getInt('mode_q2') ?? FeedMode.latestPost.orderMode;
+    final modeLocal = prefs.getInt('mode_local') ?? FeedMode.latestPost.orderMode;
+
     final selectedMode = switch (backend) {
       BackendType.t => modeT,
       BackendType.q => modeQ,
       BackendType.qOld => modeQ2,
+      BackendType.local => modeLocal, // 处理本地类型
     };
+
     setState(() {
       _backend = backend;
       _token = switch (backend) {
         BackendType.t => tokenT,
         BackendType.q => tokenQ,
         BackendType.qOld => tokenQ,
+        BackendType.local => '', // 本地无 token
       };
       _feedMode = FeedMode.values.firstWhere(
-        (mode) => mode.orderMode == selectedMode,
+            (mode) => mode.orderMode == selectedMode,
         orElse: () => FeedMode.latestPost,
       );
     });
@@ -632,6 +729,7 @@ class _LatestPostsPageState extends State<LatestPostsPage> {
       BackendType.t => BackendConfig.t,
       BackendType.q => BackendConfig.q,
       BackendType.qOld => BackendConfig.qOld,
+      BackendType.local => BackendConfig.local, // 处理本地类型
     };
   }
 
@@ -653,6 +751,7 @@ class _LatestPostsPageState extends State<LatestPostsPage> {
                 BackendType.t => result.tokenT,
                 BackendType.q => result.tokenQ,
                 BackendType.qOld => result.tokenQ,
+                BackendType.local => '', // 处理本地类型
               };
               _collapseTaggedPosts = result.collapseTaggedPosts;
               _autoHideBottomBar = result.autoHideBottomBar;
@@ -665,6 +764,8 @@ class _LatestPostsPageState extends State<LatestPostsPage> {
         ),
       ),
     );
+    // 当从设置页面返回时，重新检查本地数据库是否存在并刷新状态
+    _loadPreferences();
   }
 
   Future<void> _openSearchPage() async {
@@ -733,6 +834,9 @@ class _LatestPostsPageState extends State<LatestPostsPage> {
       case BackendType.qOld:
         await prefs.setInt('mode_q2', mode.orderMode);
         break;
+      case BackendType.local:
+        await prefs.setInt('mode_local', mode.orderMode); // 记忆本地模式偏好
+        break;
     }
     setState(() {
       _feedMode = mode;
@@ -796,12 +900,15 @@ class _LatestPostsPageState extends State<LatestPostsPage> {
     });
     final next = !(post.attention ?? false);
     try {
-      await _apiClient.toggleAttention(
-        token: _token,
-        baseUrl: _activeBaseUrl,
-        pid: post.pid,
-        enable: next,
-      );
+      // 避免在本地旧洞模式下调用网络关注接口
+      if (_backend != BackendType.local) {
+        await _apiClient.toggleAttention(
+          token: _token,
+          baseUrl: _activeBaseUrl,
+          pid: post.pid,
+          enable: next,
+        );
+      }
       await FavoritesStore.update(_backend.name, post.pid, next);
       if (!mounted) return;
       setState(() {

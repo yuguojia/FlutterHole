@@ -1,8 +1,13 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:photo_view/photo_view.dart';
+import 'package:sqflite/sqflite.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 
 import 'constants.dart';
 import 'models.dart';
@@ -135,7 +140,7 @@ class MarkdownContent extends StatelessWidget {
       },
     );
     final markdown =
-        selectable ? SelectionArea(child: markdownBody) : markdownBody;
+    selectable ? SelectionArea(child: markdownBody) : markdownBody;
     if (!canShowRefs) {
       return markdown;
     }
@@ -188,7 +193,7 @@ class MarkdownContent extends StatelessWidget {
     final uri = Uri.tryParse(href);
     if (uri == null) return;
     final launched =
-        await launchUrl(uri, mode: LaunchMode.externalApplication);
+    await launchUrl(uri, mode: LaunchMode.externalApplication);
     if (!launched && context.mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('无法打开链接: $href')),
@@ -211,19 +216,19 @@ class TagRow extends StatelessWidget {
       children: tags
           .map(
             (tag) => Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-              decoration: BoxDecoration(
-                color: scheme.secondaryContainer,
-                borderRadius: BorderRadius.circular(16),
-              ),
-              child: Text(
-                '#$tag',
-                style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                      color: scheme.onSecondaryContainer,
-                    ),
-              ),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+          decoration: BoxDecoration(
+            color: scheme.secondaryContainer,
+            borderRadius: BorderRadius.circular(16),
+          ),
+          child: Text(
+            '#$tag',
+            style: Theme.of(context).textTheme.labelSmall?.copyWith(
+              color: scheme.onSecondaryContainer,
             ),
-          )
+          ),
+        ),
+      )
           .toList(),
     );
   }
@@ -262,22 +267,22 @@ class TagPidRow extends StatelessWidget {
             children: tags
                 .map(
                   (tag) => Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 10,
-                      vertical: 4,
-                    ),
-                    decoration: BoxDecoration(
-                      color: scheme.secondaryContainer,
-                      borderRadius: BorderRadius.circular(16),
-                    ),
-                    child: Text(
-                      '#$tag',
-                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                            color: scheme.onSecondaryContainer,
-                          ),
-                    ),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 4,
+                ),
+                decoration: BoxDecoration(
+                  color: scheme.secondaryContainer,
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                child: Text(
+                  '#$tag',
+                  style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                    color: scheme.onSecondaryContainer,
                   ),
-                )
+                ),
+              ),
+            )
                 .toList(),
           ),
         ),
@@ -290,7 +295,7 @@ class TagPidRow extends StatelessWidget {
     final uri = Uri.tryParse(href);
     if (uri == null) return;
     final launched =
-        await launchUrl(uri, mode: LaunchMode.externalApplication);
+    await launchUrl(uri, mode: LaunchMode.externalApplication);
     if (!launched && context.mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('无法打开链接: $href')),
@@ -402,8 +407,42 @@ class _QuotePreviewListState extends State<QuotePreviewList> {
     }
   }
 
+  // ================= 修改：修复并发查询导致数据库关闭的 Bug =================
   Future<Post?> _loadPost(int pid) async {
     try {
+      if (widget.baseUrl == 'local://') {
+        Directory appDocDir = await getApplicationDocumentsDirectory();
+        String dbPath = p.join(appDocDir.path, 'old_hole.db');
+
+        // sqflite 默认会复用这个连接
+        Database db = await openDatabase(dbPath);
+
+        List<Map<String, dynamic>> maps = await db.query(
+          'posts',
+          where: 'pid = ?',
+          whereArgs: [pid],
+        );
+
+        // ⚠️ 删除了这里的 await db.close();
+        // 保持连接处于开启状态，让其他并行的 Future 能够继续使用它查询
+
+        if (maps.isNotEmpty) {
+          final m = maps.first;
+          return Post(
+            pid: m['pid'] as int,
+            text: m['text'] as String,
+            timestamp: m['timestamp'] as int?,
+            commentCount: m['reply_count'] as int? ?? 0,
+            attention: false,
+            tags: m['tag'] != null && m['tag'].toString().trim().isNotEmpty
+                ? [m['tag'].toString()]
+                : [],
+          );
+        }
+        return null;
+      }
+
+      // 线上环境逻辑保持不变
       final cached = await PostCache.get(widget.baseUrl, pid);
       if (cached != null) return cached;
       return await _client.fetchPostById(
@@ -423,18 +462,18 @@ class _QuotePreviewListState extends State<QuotePreviewList> {
       children: widget.pids
           .map(
             (pid) => FutureBuilder<Post?>(
-              future: _futures[pid],
-              builder: (context, snapshot) {
-                return _QuotePreviewTile(
-                  pid: pid,
-                  post: snapshot.data,
-                  onTap: snapshot.data != null && widget.onOpenPost != null
-                      ? () => widget.onOpenPost!(snapshot.data!)
-                      : null,
-                );
-              },
-            ),
-          )
+          future: _futures[pid],
+          builder: (context, snapshot) {
+            return _QuotePreviewTile(
+              pid: pid,
+              post: snapshot.data,
+              onTap: snapshot.data != null && widget.onOpenPost != null
+                  ? () => widget.onOpenPost!(snapshot.data!)
+                  : null,
+            );
+          },
+        ),
+      )
           .toList(),
     );
   }
@@ -456,9 +495,9 @@ class _QuotePreviewTile extends StatelessWidget {
     final content = post == null
         ? const _QuotePreviewShell(title: '引用加载失败')
         : _QuotePreviewShell(
-            title: '#$pid',
-            subtitle: truncateMarkdown(post!.text, 80),
-          );
+      title: '#$pid',
+      subtitle: truncateMarkdown(post!.text, 80),
+    );
     if (onTap == null) return content;
     return InkWell(
       onTap: onTap,

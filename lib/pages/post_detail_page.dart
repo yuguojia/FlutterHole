@@ -1,6 +1,10 @@
+import 'dart:io';
 import 'dart:math';
 
 import 'package:flutter/material.dart';
+import 'package:sqflite/sqflite.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 
 import '../models.dart';
 import '../services.dart';
@@ -48,6 +52,7 @@ class _PostDetailPageState extends State<PostDetailPage> {
   Post? _post;
 
   bool get _hasMore => _visibleCount < _comments.length;
+  bool get _isLocal => widget.backendKey == 'local'; // 快捷判断是否为本地模式
 
   @override
   void initState() {
@@ -80,6 +85,79 @@ class _PostDetailPageState extends State<PostDetailPage> {
     return false;
   }
 
+  // ================= 获取本地评论库 =================
+  Future<void> _fetchLocalComments() async {
+    Directory appDocDir = await getApplicationDocumentsDirectory();
+    String dbPath = p.join(appDocDir.path, 'old_hole.db');
+    Database db = await openDatabase(dbPath);
+
+    List<Map<String, dynamic>> maps = await db.query(
+      'replies',
+      where: 'pid = ?',
+      whereArgs: [widget.pid],
+      orderBy: 'cid ASC', // 评论按时间升序
+    );
+
+    final comments = maps.map((m) {
+      // 判断是否为洞主，如果是则强制标为洞主，否则使用它的名字 (Alice, Bob...)
+      String name = m['name'] as String? ?? '匿名';
+      if (m['is_dz'] == 1) {
+        name = '洞主';
+      }
+      return Comment(
+        cid: m['cid'] as int,
+        nameId: 0, // 占位
+        text: m['text'] as String,
+        timestamp: m['timestamp'] as int?,
+        localName: name, // 存入本地名字
+      );
+    }).toList();
+
+    await db.close();
+
+    if (!mounted) return;
+    setState(() {
+      _comments
+        ..clear()
+        ..addAll(comments);
+      _visibleCount = min(_pageSize, _comments.length);
+    });
+  }
+
+  // ================= 获取本地主帖详情 =================
+  Future<void> _fetchLocalPost() async {
+    Directory appDocDir = await getApplicationDocumentsDirectory();
+    String dbPath = p.join(appDocDir.path, 'old_hole.db');
+    Database db = await openDatabase(dbPath);
+
+    List<Map<String, dynamic>> maps = await db.query(
+      'posts',
+      where: 'pid = ?',
+      whereArgs: [widget.pid],
+    );
+
+    if (maps.isNotEmpty) {
+      final m = maps.first;
+      final post = Post(
+        pid: m['pid'] as int,
+        text: m['text'] as String,
+        timestamp: m['timestamp'] as int?,
+        commentCount: m['reply_count'] as int? ?? 0,
+        attention: false,
+        tags: m['tag'] != null && m['tag'].toString().trim().isNotEmpty
+            ? [m['tag'].toString()]
+            : [],
+      );
+      if (!mounted) return;
+      setState(() {
+        _post = post;
+      });
+    } else {
+      throw Exception('在本地数据库中未找到该帖子');
+    }
+    await db.close();
+  }
+
   Future<void> _fetchComments() async {
     if (!mounted) return;
     setState(() {
@@ -87,18 +165,22 @@ class _PostDetailPageState extends State<PostDetailPage> {
       _errorMessage = null;
     });
     try {
-      final comments = await _apiClient.fetchComments(
-        token: widget.token,
-        baseUrl: widget.baseUrl,
-        pid: widget.pid,
-      );
-      if (!mounted) return;
-      setState(() {
-        _comments
-          ..clear()
-          ..addAll(comments);
-        _visibleCount = min(_pageSize, _comments.length);
-      });
+      if (_isLocal) {
+        await _fetchLocalComments();
+      } else {
+        final comments = await _apiClient.fetchComments(
+          token: widget.token,
+          baseUrl: widget.baseUrl,
+          pid: widget.pid,
+        );
+        if (!mounted) return;
+        setState(() {
+          _comments
+            ..clear()
+            ..addAll(comments);
+          _visibleCount = min(_pageSize, _comments.length);
+        });
+      }
     } catch (error) {
       if (!mounted) return;
       setState(() {
@@ -121,18 +203,22 @@ class _PostDetailPageState extends State<PostDetailPage> {
       _postErrorMessage = null;
     });
     try {
-      final cached = await PostCache.get(widget.baseUrl, widget.pid);
-      final post = cached ??
-          await _apiClient.fetchPostById(
-            token: widget.token,
-            baseUrl: widget.baseUrl,
-            pid: widget.pid,
-          );
-      if (!mounted) return;
-      setState(() {
-        _post = post;
-        _isAttention = post.attention ?? _isAttention;
-      });
+      if (_isLocal) {
+        await _fetchLocalPost();
+      } else {
+        final cached = await PostCache.get(widget.baseUrl, widget.pid);
+        final post = cached ??
+            await _apiClient.fetchPostById(
+              token: widget.token,
+              baseUrl: widget.baseUrl,
+              pid: widget.pid,
+            );
+        if (!mounted) return;
+        setState(() {
+          _post = post;
+          _isAttention = post.attention ?? _isAttention;
+        });
+      }
     } catch (error) {
       if (!mounted) return;
       setState(() {
@@ -168,12 +254,15 @@ class _PostDetailPageState extends State<PostDetailPage> {
     });
     try {
       final next = !_isAttention;
-      await _apiClient.toggleAttention(
-        token: widget.token,
-        baseUrl: widget.baseUrl,
-        pid: widget.pid,
-        enable: next,
-      );
+      // 如果是本地旧洞，跳过网络请求，直接通过 FavoritesStore 存入本地关注列表
+      if (!_isLocal) {
+        await _apiClient.toggleAttention(
+          token: widget.token,
+          baseUrl: widget.baseUrl,
+          pid: widget.pid,
+          enable: next,
+        );
+      }
       await FavoritesStore.update(widget.backendKey, widget.pid, next);
       if (!mounted) return;
       setState(() {
@@ -209,6 +298,14 @@ class _PostDetailPageState extends State<PostDetailPage> {
   }
 
   Future<bool> _submitComment() async {
+    // 拦截本地模式评论
+    if (_isLocal) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('本地旧洞为只读模式，无法发送评论')),
+      );
+      return false;
+    }
+
     final text = _commentController.text.trim();
     if (text.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -246,7 +343,9 @@ class _PostDetailPageState extends State<PostDetailPage> {
   }
 
   Future<void> _openCommentComposer() async {
-    if (!widget.supportsComment) return;
+    // 拦截本地模式底部弹出框
+    if (_isLocal || !widget.supportsComment) return;
+
     await showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
@@ -278,17 +377,17 @@ class _PostDetailPageState extends State<PostDetailPage> {
                   onPressed: _isSendingComment
                       ? null
                       : () async {
-                          final ok = await _submitComment();
-                          if (ok && mounted) {
-                            Navigator.of(context).pop();
-                          }
-                        },
+                    final ok = await _submitComment();
+                    if (ok && mounted) {
+                      Navigator.of(context).pop();
+                    }
+                  },
                   icon: _isSendingComment
                       ? const SizedBox(
-                          width: 16,
-                          height: 16,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
                       : const Icon(Icons.send),
                   label: const Text('发送'),
                 ),
@@ -311,10 +410,10 @@ class _PostDetailPageState extends State<PostDetailPage> {
             tooltip: _isAttention ? '取消关注' : '关注',
             icon: _isTogglingAttention
                 ? const SizedBox(
-                    width: 20,
-                    height: 20,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
+              width: 20,
+              height: 20,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
                 : Icon(_isAttention ? Icons.star : Icons.star_border),
           ),
           IconButton(
@@ -322,10 +421,10 @@ class _PostDetailPageState extends State<PostDetailPage> {
             tooltip: '刷新',
             icon: _isRefreshing
                 ? const SizedBox(
-                    width: 20,
-                    height: 20,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
+              width: 20,
+              height: 20,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
                 : const Icon(Icons.refresh),
           ),
         ],
@@ -334,12 +433,12 @@ class _PostDetailPageState extends State<PostDetailPage> {
         onRefresh: _fetchComments,
         child: _buildBody(),
       ),
-      floatingActionButton: widget.supportsComment
+      floatingActionButton: widget.supportsComment && !_isLocal
           ? FloatingActionButton(
-              onPressed: _openCommentComposer,
-              tooltip: '写评论',
-              child: const Icon(Icons.chat_bubble_outline),
-            )
+        onPressed: _openCommentComposer,
+        tooltip: '写评论',
+        child: const Icon(Icons.chat_bubble_outline),
+      )
           : null,
     );
   }
@@ -410,10 +509,10 @@ class _PostDetailPageState extends State<PostDetailPage> {
               child: Center(
                 child: _hasMore
                     ? const SizedBox(
-                        width: 24,
-                        height: 24,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
+                  width: 24,
+                  height: 24,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
                     : const Text('没有更多评论'),
               ),
             );
@@ -430,7 +529,8 @@ class _PostDetailPageState extends State<PostDetailPage> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      formatAnonName(comment.nameId),
+                      // --- 新增：优先展示 localName，否则 fallback 到在线版 ID 解析 ---
+                      comment.localName ?? formatAnonName(comment.nameId),
                       style: Theme.of(context).textTheme.labelLarge,
                     ),
                     const SizedBox(height: 8),

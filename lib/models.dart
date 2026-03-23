@@ -65,12 +65,14 @@ class Comment {
     required this.nameId,
     required this.text,
     this.timestamp,
+    this.localName, // <--- 新增字段
   });
 
   final int cid;
   final int nameId;
   final String text;
   final int? timestamp;
+  final String? localName; // <--- 新增字段
 
   factory Comment.fromJson(Map<String, dynamic> json) {
     final timestampValue = json['timestamp'] ?? json['create_time'];
@@ -83,7 +85,8 @@ class Comment {
   }
 }
 
-enum BackendType { t, q, qOld }
+// === 新增了 local 枚举值 ===
+enum BackendType { t, q, qOld, local }
 
 enum FeedMode {
   latestReply(1, '最新回复'),
@@ -145,6 +148,17 @@ class BackendConfig {
     webProxyBaseUrl: tholeWebProxyQ2BaseUrl,
     roomId: 0,
     supportsSearch: true,
+    supportsPost: false,
+    supportsComment: false,
+  );
+
+  // === 新增了本地旧洞的配置 ===
+  static const local = BackendConfig(
+    name: '本地旧洞',
+    baseUrl: 'local://',
+    webProxyBaseUrl: 'local://',
+    roomId: 0,
+    supportsSearch: false, // 暂时不支持搜索
     supportsPost: false,
     supportsComment: false,
   );
