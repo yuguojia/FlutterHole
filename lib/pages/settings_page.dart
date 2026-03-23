@@ -11,6 +11,8 @@ import 'package:archive/archive_io.dart';
 import 'package:sqflite/sqflite.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
+import 'package:porter_2_stemmer/porter_2_stemmer.dart';
+import 'package:porter_2_stemmer/extensions.dart'; // <--- 新增这行，用于支持 String 扩展方法
 
 import '../constants.dart';
 import '../models.dart';
@@ -151,6 +153,32 @@ class _SettingsPageState extends State<SettingsPage> {
     await launchUrl(uri, mode: LaunchMode.externalApplication);
   }
 
+  // ================= 新增：定制的混合分词算法 =================
+  String _tokenizeText(String text) {
+    if (text.isEmpty) return '';
+    final tokens = <String>[];
+
+    // 正则：匹配连续的英文字母，或者连续的非英文字母且非空白字符
+    final RegExp regex = RegExp(r'[a-zA-Z]+|[^a-zA-Z\s]+');
+    final matches = regex.allMatches(text);
+
+    for (final match in matches) {
+      final str = match.group(0)!;
+      if (RegExp(r'^[a-zA-Z]+$').hasMatch(str)) {
+        // 1. 如果是纯英文单词：转小写并直接调用扩展方法提取词干 (例如: running -> run)
+        tokens.add(str.toLowerCase().stemPorter2());
+      } else {
+        // 2. 如果是中文、标点、数字、Emoji等：按 Unicode 字符逐字拆分
+        for (final rune in str.runes) {
+          tokens.add(String.fromCharCode(rune));
+        }
+      }
+    }
+    // 最后用空格将所有 token 拼起来。SQLite FTS5 默认用空格区分词汇
+    return tokens.join(' ');
+  }
+  // ========================================================
+
   // ================= 新增：导入旧洞数据的核心逻辑 =================
   Future<void> _importOldData() async {
     // 1. 调用系统文件选择器，选择 ZIP 文件
@@ -243,6 +271,20 @@ class _SettingsPageState extends State<SettingsPage> {
                 FOREIGN KEY (pid) REFERENCES posts (pid)
             )
           ''');
+
+          // --- 新增：创建 FTS4 虚拟搜索表 (解决部分安卓设备报 no such module:fts5 的问题) ---
+          await db.execute('''
+            CREATE VIRTUAL TABLE IF NOT EXISTS posts_fts USING fts4(
+                text
+            )
+          ''');
+          await db.execute('''
+            CREATE VIRTUAL TABLE IF NOT EXISTS replies_fts USING fts4(
+                pid,
+                text,
+                notindexed=pid -- FTS4 中声明不参与分词索引的语法
+            )
+          ''');
         },
       );
 
@@ -299,6 +341,12 @@ class _SettingsPageState extends State<SettingsPage> {
             'image_metadata': jsonEncode(post['image_metadata'] ?? {}),
             'vote': post['vote'] != null ? jsonEncode(post['vote']) : null,
           }, conflictAlgorithm: ConflictAlgorithm.replace);
+
+          // --- 新增：写入主帖全文搜索索引 ---
+          batch.insert('posts_fts', {
+            'rowid': post['pid'], // 强制把 FTS 的底层主键设为 pid，防重复且方便后续查表
+            'text': _tokenizeText(post['text'] ?? ''),
+          }, conflictAlgorithm: ConflictAlgorithm.replace);
         }
 
         for (var replyRaw in dataList) {
@@ -316,6 +364,13 @@ class _SettingsPageState extends State<SettingsPage> {
             'deleted': reply['deleted'] == true ? 1 : 0,
             'url': reply['url'],
             'image_metadata': jsonEncode(reply['image_metadata'] ?? {}),
+          }, conflictAlgorithm: ConflictAlgorithm.replace);
+
+          // --- 新增：写入回复全文搜索索引 ---
+          batch.insert('replies_fts', {
+            'rowid': reply['cid'], // 强制把 FTS 的底层主键设为 cid
+            'pid': reply['pid'],   // 冗余记录一下属于哪个帖子，方便搜索展示
+            'text': _tokenizeText(reply['text'] ?? ''),
           }, conflictAlgorithm: ConflictAlgorithm.replace);
         }
 

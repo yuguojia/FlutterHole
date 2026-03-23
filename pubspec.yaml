@@ -46,6 +46,7 @@ dependencies:
   sqflite: ^2.3.0             # SQLite 数据库支持
   path_provider: ^2.1.2       # 用于获取应用内部存储路径
   path: ^1.9.0                # 用于路径拼接
+  porter_2_stemmer: ^3.0.2   # 新增：用于英文单词提取词干
 
 dev_dependencies:
   flutter_test:

@@ -158,7 +158,7 @@ class BackendConfig {
     baseUrl: 'local://',
     webProxyBaseUrl: 'local://',
     roomId: 0,
-    supportsSearch: false, // 暂时不支持搜索
+    supportsSearch: true, // 暂时不支持搜索
     supportsPost: false,
     supportsComment: false,
   );
